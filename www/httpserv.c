@@ -16,6 +16,7 @@ int open_servfd(int serv_port); //initalize server port to accept connections
 void * thread(void* vargp); //Thread routine
 char* ptopath(char* i_path); //converts input path to a fread-readable path
 char* build_header(int f_size, char* extension, char* verson, int post_len); //build http header
+void serror(int clientfd); //error handler
 
 int main(int argc, char** argv){
     int serv_port, servfd, *clientfdp, clientlen=sizeof(struct sockaddr_in);
@@ -50,7 +51,7 @@ int main(int argc, char** argv){
 /*
  * build_header - builds header with message information
  */
-char* build_header(int f_size, char* extension, char* version, int post_len){ // ADD HTTP VERSION AS WELL
+char* build_header(int f_size, char* extension, char* version, int post_len){
     //get number of digits in f_size
     int len = 0;
     char* type;
@@ -63,7 +64,7 @@ char* build_header(int f_size, char* extension, char* version, int post_len){ //
     if(strcmp(extension, ".css") == 0){
         type = "text/css";
     }else if(strcmp(extension, ".js") == 0){
-        type = "application/javascript\r\n";
+        type = "application/javascript";
     }else if(strcmp(extension, ".jpg") == 0){
         type = "image/jpg";
     }else if(strcmp(extension, ".gif") == 0){
@@ -87,14 +88,6 @@ char* build_header(int f_size, char* extension, char* version, int post_len){ //
 }
 
 /*
- * send - wrapper function to send TCP packet (HTML header and data)
- */
-int send_packet(){
-	return 0;
-}
-
-
-/*
  * get - retreives requested THING and sends it along the connection
  */
 int get(char* buf, char* path, int clientfd, char* version, int post, char* post_data){
@@ -107,21 +100,24 @@ int get(char* buf, char* path, int clientfd, char* version, int post, char* post
     if(fd){
         fseek(fd, 0, SEEK_END);
         f_size = ftell(fd);
-        if(strstr(path, "fancybox") != NULL){
+        if(strstr(path, "fancybox") != NULL){ //hack around long javascript filenames
             extension = ".js";
         }else{
             extension = strchr(path, '.');
         }
 
+        //react to extra post data
         if(post_data){
         	post_len = strlen(post_data) + 46;// 46 for httpheaders
         }else{post_len = 0;}
         header = build_header(f_size, extension, version, post_len); 
         rewind(fd);
+
         //write header
         c = snprintf(buf, strlen(header)+1, "%s", header); //strlen(header)+1 because strlen ends on \n;
         write(clientfd, buf, c);
         c = 0;
+
         //write data section
     	int quotient = f_size / MAXBUF;
     	int remainder = f_size % MAXBUF;
@@ -133,10 +129,8 @@ int get(char* buf, char* path, int clientfd, char* version, int post, char* post
     	write(clientfd, buf, c);
     	bzero(buf, MAXBUF);
     	if(post){
-    		printf("Post Data: %s\n", post_data);
     		char post_string[46 + strlen(post_data)]; // 46 is combined length of html headers 
     		snprintf(post_string, sizeof(post_string)+1, "<html><body><pre><h1>%s</h1></pre></body></html>", post_data);
-    		//printf("Post String: %s",post_string);
     		write(clientfd, post_string, strlen(post_string));
     	}
         bzero(buf, MAXBUF);
@@ -146,19 +140,9 @@ int get(char* buf, char* path, int clientfd, char* version, int post, char* post
         printf("Path: %s\n", path);
         return -1;
     }
-    //free(header);
-    
     return 0;
 }
 
-
-
-/*
- * post - handles post requests by injecting POSTDATA into .html file and sending the resulting file
- */
-int post(char* buf){
-	return 1; //just concat buffer and post data
-}
 
 /*
  * ptopath - converts input path to a fread-readable path
@@ -175,13 +159,15 @@ char* ptopath(char* i_path){
 }
 
 
+
+
 /*
  * parse - parse HTTP request buffered at clientfd
  *       return -1 on failure
  */
 int parse(int clientfd){
     
-    int n;
+    int n, e;
     char buf[MAXBUF];
     const char* delim = "\r\n";
     char* request_line;
@@ -191,56 +177,74 @@ int parse(int clientfd){
     char* vers = (char*)malloc(3);
     char* post_data;
     char* post_data_raw;
-    char* cmp_method = (char*)malloc(4);
+    char* cmp_method = (char*)malloc(5);
     
     while((n = read(clientfd, buf, MAXBUF)) != 0){
+        
         if(n < 0){
             perror("Read");
             return -1;
         }
 
-        post_data_raw = strstr(buf, "\r\n\r\n");
-        post_data_raw = post_data_raw + 4;
-        post_data = (char*)malloc(strlen(post_data_raw));
-        memcpy(post_data, post_data_raw, strlen(post_data_raw));
-        //printf("post Data: %s\n", post_data);
-        //printf("Server received the following request: %d bytes -  from %d \n%s\n",n,clientfd,buf);
+        if(strncmp(buf, "POST", 4) == 0){ //get post data if post request
+            post_data_raw = strstr(buf, "\r\n\r\n");
+            post_data_raw = post_data_raw + 4;
+            post_data = (char*)malloc(strlen(post_data_raw));
+            memcpy(post_data, post_data_raw, strlen(post_data_raw));
+        }
+        
+        bzero(cmp_method, 5);
+        //printf("Server received the following request: %d bytes -  from %d : \n%s\n",n,clientfd, buf);
         request_line = strtok(buf, delim);
         method = strtok(request_line, " ");
         path = strtok(NULL, " ");
         version = strtok(NULL, " ");
-        
         memcpy(vers, strchr(version, '/')+1, 3);
         memcpy(cmp_method, method, strlen(method));
-        
-        path = ptopath(path);
-        // printf("    method: %ld bytes - %s\n", strlen(method),method);
-        // printf("    path: %ld bytes - %s\n", strlen(path),path);
-        // printf("    version: %ld bytes - %s\n", strlen(version),version);
-        
-        bzero(buf, MAXBUF);
-        if(strcmp(cmp_method, "GET") == 0){
-            get(buf, path, clientfd, vers, 0, NULL);
-        }else if (strcmp(cmp_method, "POST") == 0){
-            get(buf, path, clientfd, vers, 1, post_data);
+        if((path = ptopath(path)) == NULL){
+            e = -1;
+            break;
         }
         
+        if(strcmp(cmp_method, "GET") == 0){
+            bzero(buf, MAXBUF);
+            
+            e = get(buf, path, clientfd, vers, 0, NULL);
+            break;
+        }else if (strcmp(cmp_method, "POST") == 0){
+            bzero(buf, MAXBUF);
+            
+            e = get(buf, path, clientfd, vers, 1, post_data);
+            break;
+        }
+        e = -1;
+        break;
     }
-    //free(path);
     free(post_data);
     free(cmp_method);
     free(vers);
     
-    return 0;
+    return e;
+}
+
+/*
+ * serror - error handler routine
+ */
+void serror(int clientfd){
+    char buf[] = "HTTP/1.1 500 Internal Server Error";
+    write(clientfd, buf, strlen(buf));
 }
 
 
 /* Thread routine */
 void * thread(void* vargp){
+    int n;
     int clientfd = *((int*)vargp);
     pthread_detach(pthread_self()); /* Detach current thread so there is no pthread_join to wait on */
     free(vargp); /* Free clientfdp to all accepting new clients */
-    parse(clientfd);
+    if((n=parse(clientfd)) != 0){
+        serror(clientfd);
+    }
     close(clientfd);
     fflush(stdout);
     
@@ -268,7 +272,7 @@ int open_servfd(int serv_port){
         perror("Setting socket options");
         return -1;
     }
-
+    
     /* Assign local IP address to socket */
     bzero((char *) &serveraddr, sizeof(serveraddr));
     serveraddr.sin_family = AF_INET; 
