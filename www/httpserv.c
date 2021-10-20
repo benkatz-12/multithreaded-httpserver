@@ -15,7 +15,7 @@
 int open_servfd(int serv_port); //initalize server port to accept connections
 void * thread(void* vargp); //Thread routine
 char* ptopath(char* i_path); //converts input path to a fread-readable path
-char* build_header(int f_size, char* extension, char* verson); //build http header
+char* build_header(int f_size, char* extension, char* verson, int post_len); //build http header
 
 int main(int argc, char** argv){
     int serv_port, servfd, *clientfdp, clientlen=sizeof(struct sockaddr_in);
@@ -50,7 +50,7 @@ int main(int argc, char** argv){
 /*
  * build_header - builds header with message information
  */
-char* build_header(int f_size, char* extension, char* version){ // ADD HTTP VERSION AS WELL
+char* build_header(int f_size, char* extension, char* version, int post_len){ // ADD HTTP VERSION AS WELL
     //get number of digits in f_size
     int len = 0;
     char* type;
@@ -74,26 +74,36 @@ char* build_header(int f_size, char* extension, char* version){ // ADD HTTP VERS
         type = "text/plain";
     }else if(strcmp(extension, ".html") == 0){
         type = "text/html";
+    }else{
+    	type = "NONE";
     }
 
     char header[len + 22 + 49 + 3 + 8]; //22 is the longest extension possible and header already verified | 49 is the template | 3 is the version | 8 is <CLRF>
     char* r_header = (char*)malloc(len + 22 + 49 + 3 + 8);
-    snprintf(header, sizeof(header), "HTTP/%s 200 OK\r\nContent-Length: %d\r\nContent-Type: %s\r\n\r\n", version, fn_size, type);
+    snprintf(header, sizeof(header), "HTTP/%s 200 OK\r\nContent-Length: %d\r\nContent-Type: %s\r\n\r\n", version, fn_size + post_len, type);
     memcpy(r_header, header, strlen(header));
     
     return r_header;
 }
 
 /*
+ * send - wrapper function to send TCP packet (HTML header and data)
+ */
+int send_packet(){
+	return 0;
+}
+
+
+/*
  * get - retreives requested THING and sends it along the connection
  */
-int get(char* buf, char* path, int clientfd, char* version){
+int get(char* buf, char* path, int clientfd, char* version, int post, char* post_data){
     FILE* fd;
-    int c, f_size;
+    int c, f_size, post_len;
     char* header;
     char* extension;
     fd = fopen(path,"rb");
-    
+
     if(fd){
         fseek(fd, 0, SEEK_END);
         f_size = ftell(fd);
@@ -102,22 +112,38 @@ int get(char* buf, char* path, int clientfd, char* version){
         }else{
             extension = strchr(path, '.');
         }
-        header = build_header(f_size, extension, version);
+
+        if(post_data){
+        	post_len = strlen(post_data) + 46;// 46 for httpheaders
+        }else{post_len = 0;}
+        header = build_header(f_size, extension, version, post_len); 
         rewind(fd);
-        
-        c = snprintf(buf, MAXBUF, "%s", header);
-        if(f_size <= MAXBUF){
-            c += fread(buf+c, 1, f_size, fd);
-        }else{
-            printf("big shit\n");  // HANDLE BIG FILES WITH LOOP OF SHIT
-        }
-        
+        //write header
+        c = snprintf(buf, strlen(header)+1, "%s", header); //strlen(header)+1 because strlen ends on \n;
         write(clientfd, buf, c);
-        
+        c = 0;
+        //write data section
+    	int quotient = f_size / MAXBUF;
+    	int remainder = f_size % MAXBUF;
+    	for(int i = 0; i < quotient; i++){
+    		c = fread(buf, 1, MAXBUF, fd);
+    		write(clientfd, buf, c);
+    	}
+    	c = fread(buf, 1, remainder, fd); 
+    	write(clientfd, buf, c);
+    	bzero(buf, MAXBUF);
+    	if(post){
+    		printf("Post Data: %s\n", post_data);
+    		char post_string[46 + strlen(post_data)]; // 46 is combined length of html headers 
+    		snprintf(post_string, sizeof(post_string)+1, "<html><body><pre><h1>%s</h1></pre></body></html>", post_data);
+    		//printf("Post String: %s",post_string);
+    		write(clientfd, post_string, strlen(post_string));
+    	}
         bzero(buf, MAXBUF);
         
     }else{
         perror("fopen");
+        printf("Path: %s\n", path);
         return -1;
     }
     //free(header);
@@ -125,6 +151,14 @@ int get(char* buf, char* path, int clientfd, char* version){
     return 0;
 }
 
+
+
+/*
+ * post - handles post requests by injecting POSTDATA into .html file and sending the resulting file
+ */
+int post(char* buf){
+	return 1; //just concat buffer and post data
+}
 
 /*
  * ptopath - converts input path to a fread-readable path
@@ -155,38 +189,46 @@ int parse(int clientfd){
     char* path;
     char* version;
     char* vers = (char*)malloc(3);
-    
+    char* post_data;
+    char* post_data_raw;
+    char* cmp_method = (char*)malloc(4);
     
     while((n = read(clientfd, buf, MAXBUF)) != 0){
         if(n < 0){
             perror("Read");
             return -1;
         }
-        printf("Server received the following request: %d bytes -  from %d \n%s\n",n,clientfd,buf);
+
+        post_data_raw = strstr(buf, "\r\n\r\n");
+        post_data_raw = post_data_raw + 4;
+        post_data = (char*)malloc(strlen(post_data_raw));
+        memcpy(post_data, post_data_raw, strlen(post_data_raw));
+        //printf("post Data: %s\n", post_data);
+        //printf("Server received the following request: %d bytes -  from %d \n%s\n",n,clientfd,buf);
         request_line = strtok(buf, delim);
         method = strtok(request_line, " ");
         path = strtok(NULL, " ");
         version = strtok(NULL, " ");
+        
         memcpy(vers, strchr(version, '/')+1, 3);
+        memcpy(cmp_method, method, strlen(method));
         
         path = ptopath(path);
-        printf("    method: %ld bytes - %s\n", strlen(method),method);
-        printf("    path: %ld bytes - %s\n", strlen(path),path);
-        printf("    version: %ld bytes - %s\n", strlen(version),version);
+        // printf("    method: %ld bytes - %s\n", strlen(method),method);
+        // printf("    path: %ld bytes - %s\n", strlen(path),path);
+        // printf("    version: %ld bytes - %s\n", strlen(version),version);
         
         bzero(buf, MAXBUF);
-        
-        if(strcmp(method, "GET")){
-            
-            get(buf, path, clientfd, vers);
-            
-        }else if (strcmp(method, "POST")){
-            printf("POST\n");
+        if(strcmp(cmp_method, "GET") == 0){
+            get(buf, path, clientfd, vers, 0, NULL);
+        }else if (strcmp(cmp_method, "POST") == 0){
+            get(buf, path, clientfd, vers, 1, post_data);
         }
         
     }
     //free(path);
-    
+    free(post_data);
+    free(cmp_method);
     free(vers);
     
     return 0;
