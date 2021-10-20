@@ -63,7 +63,7 @@ char* build_header(int f_size, char* extension, char* version, int post_len){ //
     if(strcmp(extension, ".css") == 0){
         type = "text/css";
     }else if(strcmp(extension, ".js") == 0){
-        type = "application/javascript\r\n";
+        type = "application/javascript";
     }else if(strcmp(extension, ".jpg") == 0){
         type = "image/jpg";
     }else if(strcmp(extension, ".gif") == 0){
